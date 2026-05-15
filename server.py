@@ -44,6 +44,10 @@ from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
 from app.node_replace_manager import NodeReplaceManager
+from app.prompt_metadata import (
+    extract_envelope_from_extra_data,
+    inject_envelope,
+)
 from typing import Optional, Union
 from api_server.routes.internal.internal_routes import InternalRoutes
 from protocol import BinaryEventTypes
@@ -250,7 +254,13 @@ class PromptServer():
         routes = web.RouteTableDef()
         self.routes = routes
         self.last_node_id = None
+        self.last_prompt_id = None
         self.client_id = None
+
+        # prompt_id -> metadata envelope captured at submission and injected
+        # into outbound execution events. Keeps the workflow scope (and any
+        # other client-supplied tags) out of the execution layer.
+        self._prompt_metadata: dict[str, dict] = {}
 
         self.on_prompt_handlers = []
 
@@ -275,7 +285,10 @@ class PromptServer():
                 await self.send("status", {"status": self.get_queue_info(), "sid": sid}, sid)
                 # On reconnect if we are the currently executing client send the current node
                 if self.client_id == sid and self.last_node_id is not None:
-                    await self.send("executing", { "node": self.last_node_id }, sid)
+                    await self.send("executing", self._inject_prompt_metadata({
+                        "node": self.last_node_id,
+                        "prompt_id": self.last_prompt_id,
+                    }), sid)
 
                 # Flag to track if we've received the first message
                 first_message = True
@@ -955,6 +968,7 @@ class PromptServer():
                         if sensitive_val in extra_data:
                             sensitive[sensitive_val] = extra_data.pop(sensitive_val)
                     extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
+                    self.register_prompt_metadata(prompt_id, extra_data)
                     self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
@@ -1216,7 +1230,23 @@ class PromptServer():
         elif sid in self.sockets:
             await send_socket_catch_exception(self.sockets[sid].send_json, message)
 
+    def register_prompt_metadata(self, prompt_id: str, extra_data) -> None:
+        """Record per-prompt metadata for injection into outbound execution
+        events. Called at submission, before the prompt is queued."""
+        envelope = extract_envelope_from_extra_data(extra_data)
+        if envelope is not None:
+            self._prompt_metadata[prompt_id] = envelope
+
+    def unregister_prompt_metadata(self, prompt_id: str) -> None:
+        """Drop the per-prompt metadata envelope. Called after the prompt
+        has finished executing and its terminal events have been queued."""
+        self._prompt_metadata.pop(prompt_id, None)
+
+    def _inject_prompt_metadata(self, data):
+        return inject_envelope(data, self._prompt_metadata.get)
+
     def send_sync(self, event, data, sid=None):
+        data = self._inject_prompt_metadata(data)
         self.loop.call_soon_threadsafe(
             self.messages.put_nowait, (event, data, sid))
 
