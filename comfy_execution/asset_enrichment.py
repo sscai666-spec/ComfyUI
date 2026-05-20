@@ -6,11 +6,10 @@ import os
 def enrich_output_with_assets(output_ui: dict) -> dict:
     """Inject asset id into file-type output entries when --enable-assets is set.
 
-    Only ``id`` is added — per the Asset Identity RFC the WebSocket payload
-    carries just enough for the client to fetch the full asset via
-    GET /api/assets/{id}.  hash, name, preview_url, and size are intentionally
-    omitted: hash is already encoded in the filename; the rest require an
-    explicit API call.
+    Only ``id`` is added — the WebSocket payload carries just enough for the
+    client to fetch the full asset via GET /api/assets/{id}. hash, name,
+    preview_url, and size are intentionally omitted: hash is already encoded
+    in the filename; the rest require an explicit API call.
 
     Returns a new dict; entries without a resolvable on-disk file path are left
     unchanged. Errors are caught per-entry so a failure never blocks the WS
