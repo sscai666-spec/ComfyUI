@@ -192,7 +192,8 @@ class SplitImageChannels(io.ComfyNode):
             node_id="SplitImageChannels",
             search_aliases=["convert to grayscale", "extract channels", "grayscale", "split channels", "RGB channels"],
             display_name="Split Image Channels",
-            category="mask/compositing",
+            category="image/compositing",
+            description="Splits an image into its red, green, blue, and alpha channels.",
             inputs=[
                 io.Image.Input("image"),
             ],
