@@ -89,9 +89,9 @@ if not args.cuda_malloc:
             if PerformanceFeature.AutoTune not in args.fast:  # Autotune has issues with cuda malloc
                 cuda_version = get_raw_cuda_version(version)
                 if cuda_version is not None and cuda_version >= 130:
-                        args.cuda_malloc = True
-                    else:
-                        args.cuda_malloc = cuda_malloc_supported()
+                    args.cuda_malloc = True
+                else:
+                    args.cuda_malloc = cuda_malloc_supported()
     except:
         pass
 
