@@ -1,4 +1,4 @@
-"""Tests for app.assets.services.cursor.
+"""Tests for utils.cursor.
 
 The byte-identity fixtures below pin the wire format so a parallel
 implementation in another runtime can mint exchange-compatible cursors
@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.assets.services.cursor import (
+from utils.cursor import (
     MAX_CURSOR_ID_LENGTH,
     MAX_CURSOR_VALUE_LENGTH,
     MAX_ENCODED_CURSOR_LENGTH,
