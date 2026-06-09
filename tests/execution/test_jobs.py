@@ -1,5 +1,7 @@
 """Unit tests for comfy_execution/jobs.py"""
 
+import pytest
+
 from comfy_execution.jobs import (
     JobStatus,
     is_previewable,
@@ -9,8 +11,10 @@ from comfy_execution.jobs import (
     normalize_outputs,
     get_outputs_summary,
     apply_sorting,
+    get_all_jobs,
     has_3d_extension,
 )
+from utils.cursor import InvalidCursorError
 
 
 class TestJobStatus:
@@ -595,3 +599,93 @@ class TestNormalizeOutputs:
                 'result': ['data.json', [1, 2, 3]],
             }
         }
+
+
+def _completed_history(jobs_by_id: dict) -> dict:
+    """Build a history dict of completed jobs keyed by id, with the given create_times."""
+    return {
+        job_id: {
+            'prompt': (0, '', {}, {'create_time': create_time}, {}),
+            'status': {'status_str': 'success', 'messages': []},
+            'outputs': {},
+        }
+        for job_id, create_time in jobs_by_id.items()
+    }
+
+
+def _walk_cursor(history: dict, sort_order: str, limit: int) -> list[str]:
+    """Page through every job using only next_cursor, asserting the page invariants."""
+    collected: list[str] = []
+    seen: set[str] = set()
+    after = None
+    for _ in range(100):
+        jobs, _total, has_more, next_cursor = get_all_jobs(
+            [], [], history, sort_order=sort_order, limit=limit, after=after
+        )
+        assert len(jobs) <= limit
+        for job in jobs:
+            assert job['id'] not in seen, f"{job['id']} returned on two pages"
+            seen.add(job['id'])
+            collected.append(job['id'])
+        if not has_more:
+            assert next_cursor is None, "final page must not emit a cursor"
+            return collected
+        assert next_cursor is not None, "non-final page must emit a cursor"
+        after = next_cursor
+    raise AssertionError("cursor paging did not terminate")
+
+
+class TestGetAllJobsCursor:
+    """Cursor pagination on get_all_jobs()."""
+
+    def test_round_trip_desc(self):
+        history = _completed_history({'j1': 100, 'j2': 200, 'j3': 300, 'j4': 400, 'j5': 500})
+        assert _walk_cursor(history, 'desc', 2) == ['j5', 'j4', 'j3', 'j2', 'j1']
+
+    def test_round_trip_asc(self):
+        history = _completed_history({'j1': 100, 'j2': 200, 'j3': 300, 'j4': 400, 'j5': 500})
+        assert _walk_cursor(history, 'asc', 2) == ['j1', 'j2', 'j3', 'j4', 'j5']
+
+    def test_tiebreaker_same_create_time(self):
+        """Rows sharing a create_time must page by the id tiebreaker with no gaps or repeats."""
+        history = _completed_history({'a': 100, 'b': 100, 'c': 100})
+        # Ground truth: a single page large enough to hold them all, same sort.
+        single, _total, _hm, _nc = get_all_jobs([], [], history, sort_order='desc', limit=10)
+        truth = [j['id'] for j in single]
+        assert _walk_cursor(history, 'desc', 1) == truth
+        assert sorted(truth) == ['a', 'b', 'c']
+
+    def test_final_page_omits_cursor(self):
+        history = _completed_history({'j1': 100, 'j2': 200, 'j3': 300})
+        jobs, total, has_more, next_cursor = get_all_jobs(
+            [], [], history, sort_order='desc', limit=3
+        )
+        assert total == 3
+        assert has_more is False
+        assert next_cursor is None
+
+    def test_offset_mode_mints_bootstrap_cursor(self):
+        """First page in offset mode still emits a cursor so a client can switch to keyset."""
+        history = _completed_history({'j1': 100, 'j2': 200, 'j3': 300})
+        jobs, _total, has_more, next_cursor = get_all_jobs(
+            [], [], history, sort_order='desc', limit=2
+        )
+        assert [j['id'] for j in jobs] == ['j3', 'j2']
+        assert has_more is True
+        assert next_cursor is not None
+
+    def test_cursor_ignored_for_execution_duration_sort(self):
+        """execution_duration has no keyset; a cursor is ignored and none is minted."""
+        history = _completed_history({'j1': 100, 'j2': 200, 'j3': 300})
+        _first, _t, _hm, cursor = get_all_jobs([], [], history, sort_order='desc', limit=2)
+        jobs, _total, _has_more, next_cursor = get_all_jobs(
+            [], [], history, sort_by='execution_duration', sort_order='desc',
+            limit=2, after=cursor
+        )
+        assert next_cursor is None
+        assert len(jobs) == 2  # offset mode, cursor disregarded
+
+    def test_malformed_cursor_raises(self):
+        history = _completed_history({'j1': 100})
+        with pytest.raises(InvalidCursorError):
+            get_all_jobs([], [], history, sort_order='desc', limit=2, after='not-a-cursor')

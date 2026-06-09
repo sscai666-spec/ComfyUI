@@ -6,6 +6,16 @@ Provides normalization and helper functions for job status tracking.
 from typing import Optional
 
 from comfy_api.internal import prune_dict
+from utils.cursor import (
+    decode_cursor,
+    decode_cursor_int,
+    encode_cursor,
+)
+
+# Cursor pagination is defined only for the created_at timeline. execution_duration
+# is a derived value with no stable keyset, so it stays offset-only (matching the
+# cloud jobs implementation).
+CURSOR_SORT_FIELD = 'created_at'
 
 
 class JobStatus:
@@ -282,18 +292,29 @@ def get_outputs_summary(outputs: dict) -> tuple[int, Optional[dict]]:
     return count, preview_output or fallback_preview
 
 
+def _job_id_key(job: dict) -> str:
+    return job.get('id') or ''
+
+
 def apply_sorting(jobs: list[dict], sort_by: str, sort_order: str) -> list[dict]:
-    """Sort jobs list by specified field and order."""
+    """Sort jobs list by specified field and order.
+
+    The job ``id`` is appended as a tiebreaker so rows sharing a sort value have
+    a stable, deterministic order. This makes the (sort_value, id) pair a valid
+    keyset for cursor pagination — without it, ties could reorder between pages
+    and a cursor would skip or repeat rows.
+    """
     reverse = (sort_order == 'desc')
 
     if sort_by == 'execution_duration':
         def get_sort_key(job):
             start = job.get('execution_start_time', 0)
             end = job.get('execution_end_time', 0)
-            return end - start if end and start else 0
+            duration = end - start if end and start else 0
+            return (duration, _job_id_key(job))
     else:
         def get_sort_key(job):
-            return job.get('create_time', 0)
+            return (job.get('create_time') or 0, _job_id_key(job))
 
     return sorted(jobs, key=get_sort_key, reverse=reverse)
 
@@ -334,8 +355,9 @@ def get_all_jobs(
     sort_by: str = "created_at",
     sort_order: str = "desc",
     limit: Optional[int] = None,
-    offset: int = 0
-) -> tuple[list[dict], int]:
+    offset: int = 0,
+    after: Optional[str] = None
+) -> tuple[list[dict], int, bool, Optional[str]]:
     """
     Get all jobs (running, pending, completed) with filtering and sorting.
 
@@ -348,10 +370,14 @@ def get_all_jobs(
         sort_by: Field to sort by ('created_at', 'execution_duration')
         sort_order: 'asc' or 'desc'
         limit: Maximum number of items to return
-        offset: Number of items to skip
+        offset: Number of items to skip (ignored when a cursor is supplied)
+        after: Opaque keyset cursor from a prior next_cursor. Honored only for
+            created_at sort; takes precedence over offset. Raises
+            InvalidCursorError on a malformed cursor.
 
     Returns:
-        tuple: (jobs_list, total_count)
+        tuple: (jobs_list, total_count, has_more, next_cursor)
+        next_cursor is non-None only for created_at sort when more rows remain.
     """
     jobs = []
 
@@ -381,9 +407,38 @@ def get_all_jobs(
 
     total_count = len(jobs)
 
-    if offset > 0:
+    use_cursor = after is not None and sort_by == CURSOR_SORT_FIELD
+    if use_cursor:
+        ascending = sort_order == 'asc'
+        payload = decode_cursor(after, [CURSOR_SORT_FIELD], expected_order=sort_order)
+        cursor_key = (decode_cursor_int(payload), payload.id)
+        jobs = [
+            j for j in jobs
+            if (_job_keyset(j) > cursor_key if ascending else _job_keyset(j) < cursor_key)
+        ]
+    elif offset > 0:
         jobs = jobs[offset:]
+
+    has_more = limit is not None and len(jobs) > limit
     if limit is not None:
         jobs = jobs[:limit]
 
-    return (jobs, total_count)
+    # Mint a forward cursor for the created_at timeline whenever more rows remain.
+    # Emitting it in offset mode too lets a client bootstrap into cursor pagination
+    # on its next request without a separate round trip.
+    next_cursor = None
+    if sort_by == CURSOR_SORT_FIELD and has_more and jobs:
+        last = jobs[-1]
+        next_cursor = encode_cursor(
+            CURSOR_SORT_FIELD,
+            str(last.get('create_time') or 0),
+            _job_id_key(last),
+            order=sort_order,
+        )
+
+    return (jobs, total_count, has_more, next_cursor)
+
+
+def _job_keyset(job: dict) -> tuple[int, str]:
+    """Keyset tuple matching the (create_time, id) ordering apply_sorting produces."""
+    return (job.get('create_time') or 0, _job_id_key(job))

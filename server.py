@@ -9,6 +9,7 @@ import nodes
 import folder_paths
 import execution
 from comfy_execution.jobs import JobStatus, get_job, get_all_jobs
+from utils.cursor import InvalidCursorError
 import uuid
 import urllib
 import json
@@ -785,6 +786,8 @@ class PromptServer():
                 sort_order: Sort direction: asc, desc (default)
                 limit: Max items to return (positive integer)
                 offset: Items to skip (non-negative integer, default 0)
+                after: Opaque keyset cursor from a prior next_cursor; takes
+                    precedence over offset. Honored only for created_at sort.
             """
             query = request.rel_url.query
 
@@ -792,6 +795,7 @@ class PromptServer():
             workflow_id = query.get('workflow_id')
             sort_by = query.get('sort_by', 'created_at').lower()
             sort_order = query.get('sort_order', 'desc').lower()
+            after = query.get('after')
 
             status_filter = None
             if status_param:
@@ -850,26 +854,35 @@ class PromptServer():
             running = _remove_sensitive_from_queue(running)
             queued = _remove_sensitive_from_queue(queued)
 
-            jobs, total = get_all_jobs(
-                running, queued, history,
-                status_filter=status_filter,
-                workflow_id=workflow_id,
-                sort_by=sort_by,
-                sort_order=sort_order,
-                limit=limit,
-                offset=offset
-            )
+            try:
+                jobs, total, has_more, next_cursor = get_all_jobs(
+                    running, queued, history,
+                    status_filter=status_filter,
+                    workflow_id=workflow_id,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                    limit=limit,
+                    offset=offset,
+                    after=after
+                )
+            except InvalidCursorError:
+                return web.json_response(
+                    {"error": "Invalid pagination cursor", "code": "INVALID_CURSOR"},
+                    status=400
+                )
 
-            has_more = (offset + len(jobs)) < total
+            pagination = {
+                'offset': offset,
+                'limit': limit,
+                'total': total,
+                'has_more': has_more
+            }
+            if next_cursor is not None:
+                pagination['next_cursor'] = next_cursor
 
             return web.json_response({
                 'jobs': jobs,
-                'pagination': {
-                    'offset': offset,
-                    'limit': limit,
-                    'total': total,
-                    'has_more': has_more
-                }
+                'pagination': pagination
             })
 
         @routes.get("/api/jobs/{job_id}")
