@@ -2,6 +2,7 @@ import os
 import importlib.util
 from comfy.cli_args import args, PerformanceFeature
 import subprocess
+import re
 
 #Can't use pytorch to get the GPU names because the cuda malloc has to be set before the first import.
 def get_gpu_names():
@@ -80,7 +81,10 @@ except:
 def get_raw_cuda_version(version_str):
     match = re.search(r'\+cu(\d+)', version_str)
     if match:
-        return match.group(1)
+        try:
+            return int(match.group(1))
+        except:
+            pass
     return None
 
 if not args.cuda_malloc:
