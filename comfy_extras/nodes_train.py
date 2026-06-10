@@ -15,6 +15,7 @@ import comfy.sampler_helpers
 import comfy.sd
 import comfy.utils
 import comfy.model_management
+from comfy.conds import CONDRegular, CONDList
 from comfy.cli_args import args, PerformanceFeature
 import comfy_extras.nodes_custom_sampler
 import folder_paths
@@ -120,6 +121,11 @@ def process_cond_list(d, prefix=""):
                 process_cond_list(v, f"{prefix}.{k}")
             elif isinstance(v, torch.Tensor):
                 d[k] = v.clone()
+            elif isinstance(v, CONDList):
+                v.cond = [t.detach() if isinstance(t, torch.Tensor) else t for t in v.cond]
+            elif isinstance(v, CONDRegular):
+                if isinstance(v.cond, torch.Tensor):
+                    v.cond = v.cond.detach()
             elif isinstance(v, (list, tuple)):
                 for index, item in enumerate(v):
                     process_cond_list(item, f"{prefix}.{k}.{index}")
@@ -951,7 +957,7 @@ class TrainLoraNode(io.ComfyNode):
         return io.Schema(
             node_id="TrainLoraNode",
             display_name="Train LoRA",
-            category="training",
+            category="model/training",
             is_experimental=True,
             is_input_list=True,  # All inputs become lists
             inputs=[
@@ -1309,7 +1315,7 @@ class LoraModelLoader(io.ComfyNode):
         return io.Schema(
             node_id="LoraModelLoader",
             display_name="Load LoRA Model",
-            category="loaders",
+            category="model/loaders",
             is_experimental=True,
             inputs=[
                 io.Model.Input(
@@ -1405,7 +1411,7 @@ class LossGraphNode(io.ComfyNode):
             node_id="LossGraphNode",
             search_aliases=["training chart", "training visualization", "plot loss"],
             display_name="Plot Loss Graph",
-            category="training",
+            category="model/training",
             is_experimental=True,
             is_output_node=True,
             inputs=[
